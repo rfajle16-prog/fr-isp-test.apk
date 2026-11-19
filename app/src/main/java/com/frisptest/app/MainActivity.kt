@@ -1,30 +1,89 @@
 package com.frisptest.app
 
+import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.os.Bundle
+import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import org.json.JSONObject
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : Activity() {
+
+    private lateinit var webView: WebView
+    private val executor = Executors.newSingleThreadExecutor()
+    private val isRunning = AtomicBoolean(false)
+
+    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = 0xFF040D1E.toInt()
-        val webView = WebView(this)
-        webView.settings.javaScriptEnabled = true
-        val html = """
-            <!DOCTYPE html>
-            <html lang="bn">
-            <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-            <body style="margin:0;background:#040d1e;color:#e6f7ff;font-family:sans-serif;display:flex;flex-direction:column;min-height:100vh;justify-content:space-between;text-align:center;">
-              <div style="padding:20px;background:#0a2550;border-bottom:2px solid #00e5ff;font-size:24px;font-weight:bold;color:#00e5ff;">FR ISP TEST</div>
-              <div style="padding:24px;">
-                <h2 style="color:#00e5ff;">APK Build Successful!</h2>
-                <p style="font-size:18px;">বাংলা পরীক্ষা: রাউটার, ব্যান্ডউইথ ও সংযুক্ত লাইন</p>
-              </div>
-              <div style="padding:14px;background:#0a2550;border-top:1px solid #00e5ff;color:#00e5ff;font-weight:bold;">FR ISP TEST</div>
-            </body>
-            </html>
-        """.trimIndent()
-        webView.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+
+        webView = WebView(this).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            addJavascriptInterface(WebBridge(), "AndroidBridge")
+            loadUrl("file:///android_asset/index.html")
+        }
         setContentView(webView)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        executor.shutdownNow()
+    }
+
+    inner class WebBridge {
+        @JavascriptInterface
+        fun startTest(pkgInput: String) {
+            val pkgMbps = pkgInput.trim().toDoubleOrNull()?.takeIf { it > 0.0 && it <= 10000.0 }
+            if (isRunning.compareAndSet(false, true)) {
+                executor.execute {
+                    try {
+                        val resJson = DiagnosticEngine(this@MainActivity).runAll(pkgMbps) { pct, msg ->
+                            runOnUiThread {
+                                webView.evaluateJavascript(
+                                    "window.onNativeProgress($pct, ${JSONObject.quote(msg)})",
+                                    null
+                                )
+                            }
+                        }
+                        val jsonStr = resJson.toString()
+                        runOnUiThread {
+                            webView.evaluateJavascript(
+                                "window.onNativeResult(${JSONObject.quote(jsonStr)})",
+                                null
+                            )
+                        }
+                    } catch (e: Exception) {
+                        val errMsg = e.message ?: "Unknown error"
+                        runOnUiThread {
+                            webView.evaluateJavascript(
+                                "window.onNativeError(${JSONObject.quote(errMsg)})",
+                                null
+                            )
+                        }
+                    } finally {
+                        isRunning.set(false)
+                    }
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun copyReport(text: String): Boolean {
+            return try {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val clip = ClipData.newPlainText("FR ISP TEST Report", text)
+                cm.setPrimaryClip(clip)
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
     }
 }
