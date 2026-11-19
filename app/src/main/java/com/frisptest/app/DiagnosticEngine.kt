@@ -30,6 +30,12 @@ class DiagnosticEngine(private val context: Context) {
 
     private fun round2(v: Double): Double = (v * 100.0).roundToInt() / 100.0
 
+    private fun levelTag(level: String): String = when (level) {
+        "ok" -> "✅ GOOD"
+        "warn" -> "⚠️ WARNING"
+        else -> "🔴 CRITICAL"
+    }
+
     private fun getDhakaTimeInfo(): JSONObject {
         val tz = TimeZone.getTimeZone("GMT+06:00")
         val cal = Calendar.getInstance(tz)
@@ -163,9 +169,11 @@ class DiagnosticEngine(private val context: Context) {
             }
         }
         return if (times.isEmpty()) {
-            JSONObject().put("ok", false).put("ms", JSONObject.NULL)
+            JSONObject().put("ok", false).put("ms", JSONObject.NULL).put("level", "danger")
         } else {
-            JSONObject().put("ok", true).put("ms", round2(times.average()))
+            val avgMs = round2(times.average())
+            val lvl = if (avgMs > 120.0) "warn" else "ok"
+            JSONObject().put("ok", true).put("ms", avgMs).put("level", lvl)
         }
     }
 
@@ -374,6 +382,8 @@ class DiagnosticEngine(private val context: Context) {
         val localLevel: String
         val bwText: String
         val bwLevel: String
+        val inetLevel: String
+        val ulLevel: String
         val overallStatus: String
         val overallLevel: String
 
@@ -384,9 +394,11 @@ class DiagnosticEngine(private val context: Context) {
             localLevel = "danger"
             bwText = "যাচাই করা যায়নি (সংযোগ নেই)"
             bwLevel = "danger"
+            inetLevel = "danger"
+            ulLevel = "danger"
             addFinding("রাউটার / Wi-Fi সংযোগ বিচ্ছিন্ন", "ফোন কোনো Wi-Fi/নেটওয়ার্কে যুক্ত নয় অথবা Local IP পাওয়া যায়নি।", "danger")
             shortIssues.add("ফোন Wi-Fi/রাউটারে কানেক্ট নেই")
-            overallStatus = "বিচ্ছিন্ন"
+            overallStatus = "🔴 CRITICAL — বিচ্ছিন্ন (Disconnected)"
             overallLevel = "danger"
         } else {
             // ১. রাউটারের অবস্থা
@@ -459,7 +471,14 @@ class DiagnosticEngine(private val context: Context) {
 
             // ৩. ইন্টারনেট ও DNS
             val iLoss = pInet.optDouble("loss", 100.0)
+            val iAvg = pInet.optDouble("avg", 0.0)
             val iJitter = pInet.optDouble("jitter", 0.0)
+            inetLevel = when {
+                !inetOk || iLoss > 5.0 -> "danger"
+                iLoss > 0.0 || iJitter > 20.0 || iAvg > 80.0 -> "warn"
+                else -> "ok"
+            }
+
             if (!inetOk) {
                 addFinding("ইন্টারনেট বিচ্ছিন্ন (ফাইবার কাটা / ONU LOS / ISP ডাউন)", "রাউটার কাজ করলেও ইন্টারনেটে (8.8.8.8) কোনো সংযোগ নেই। ONU-তে লাল LOS বাতি জ্বলছে কি না দেখুন অথবা ISP-র লাইন ডাউন।", "danger")
                 shortIssues.add("ইন্টারনেট সংযোগ নেই (ONU LOS লাল বাতি / ফাইবার / ISP চেক করুন)")
@@ -483,9 +502,11 @@ class DiagnosticEngine(private val context: Context) {
             if (!inetOk) {
                 bwText = "ইন্টারনেট বিচ্ছিন্ন (ব্যান্ডউইথ পাওয়া যাচ্ছে না)"
                 bwLevel = "danger"
+                ulLevel = "danger"
             } else if (!dlRes.optBoolean("ok", false) || !ulRes.optBoolean("ok", false)) {
                 bwText = "স্পিড টেস্ট ব্যর্থ (সংযোগ অস্থির)"
                 bwLevel = "warn"
+                ulLevel = "warn"
             } else {
                 val dl = dlRes.getDouble("mbps")
                 val ul = ulRes.getDouble("mbps")
@@ -493,6 +514,7 @@ class DiagnosticEngine(private val context: Context) {
                     val dlPct = (dl / pkgMbps) * 100.0
                     val ulPct = (ul / pkgMbps) * 100.0
                     val pkgStr = if (pkgMbps % 1.0 == 0.0) pkgMbps.toInt().toString() else pkgMbps.toString()
+                    ulLevel = if (ulPct < 60) "warn" else "ok"
                     if (dlPct < 50) {
                         bwText = "উচ্চ চাপ — প্যাকেজের তুলনায় স্পিড অনেক কম ($dl/$pkgStr Mbps, ${dlPct.roundToInt()}%)"
                         bwLevel = "danger"
@@ -508,6 +530,7 @@ class DiagnosticEngine(private val context: Context) {
                         bwLevel = "ok"
                     }
                 } else {
+                    ulLevel = if (ul < 3) "warn" else "ok"
                     if (dl < 15 && ul > dl * 2) {
                         bwText = "উচ্চ ডাউনলোড চাপ — $periodBn-এ কনজেশন (DL $dl বনাম UL $ul Mbps)"
                         bwLevel = "warn"
@@ -530,16 +553,22 @@ class DiagnosticEngine(private val context: Context) {
 
             if (findings.length() == 0) {
                 addFinding("সবকিছু স্বাভাবিক আছে", "রাউটার, লোকাল লাইন, পিং, জিটার ও ব্যান্ডউইথ সন্তোষজনক অবস্থায় আছে।", "ok")
-                overallStatus = "ভালো (Normal)"
+                overallStatus = "✅ GOOD — সবকিছু ভালো (Normal)"
                 overallLevel = "ok"
             } else if (!inetOk || !rOk) {
-                overallStatus = "গুরুতর সমস্যা (Critical)"
+                overallStatus = "🔴 CRITICAL — গুরুতর সমস্যা"
                 overallLevel = "danger"
             } else {
-                overallStatus = "সমস্যা শনাক্ত হয়েছে (Attention Needed)"
+                overallStatus = "⚠️ WARNING — সতর্কতা (Attention Needed)"
                 overallLevel = "warn"
             }
         }
+
+        pRouter.put("level", routerLevel)
+        pHop2.put("level", localLevel)
+        pInet.put("level", inetLevel)
+        dlRes.put("level", bwLevel)
+        ulRes.put("level", ulLevel)
 
         val dlTxt = if (dlRes.optBoolean("ok", false)) "${dlRes.getDouble("mbps")} Mbps" else "ব্যর্থ"
         val ulTxt = if (ulRes.optBoolean("ok", false)) "${ulRes.getDouble("mbps")} Mbps" else "ব্যর্থ"
@@ -549,20 +578,22 @@ class DiagnosticEngine(private val context: Context) {
         } else ""
         val pingTxt = if (inetOk) "${pInet.getDouble("avg")}ms / Jitter ${pInet.getDouble("jitter")}ms / Loss ${pInet.getDouble("loss")}%" else "সংযোগ নেই"
         val rPingTxt = if (pRouter.optBoolean("ok", false)) "${pRouter.getDouble("avg")}ms (Jitter ${pRouter.getDouble("jitter")}ms)" else "ব্যর্থ"
+        val dnsTxt = if (dnsRes.optBoolean("ok", false)) "${dnsRes.getDouble("ms")} ms" else "ব্যর্থ"
         val issueSummary = if (shortIssues.isNotEmpty()) shortIssues.joinToString("; ") else "কোনো বড় সমস্যা পাওয়া যায়নি"
 
         val shortReport = buildString {
             appendLine("📡 $APP_NAME রিপোর্ট (${timeInfo.getString("short_time")} BST)")
-            appendLine("• অবস্থা: $overallStatus")
+            appendLine("• সামগ্রিক অবস্থা: $overallStatus")
             appendLine("• ISP/ব্যান্ডউইথ: ${ispInfo.getString("display")}")
             appendLine("• রাউটার IP: ${hop1 ?: "N/A"} | লোকাল IP: ${localIp ?: "N/A"}")
             appendLine("• সময়কাল: ${timeInfo.getString("period_bn")}")
-            appendLine("• স্পিড$pkgTxt: ডাউনলোড $dlTxt | আপলোড $ulTxt")
-            appendLine("• রাউটার পিং: $rPingTxt")
-            appendLine("• ইন্টারনেট পিং: $pingTxt")
-            appendLine("• রাউটারের অবস্থা: $routerText")
-            appendLine("• লোকাল লাইনের চাপ (ONU/কেবল): $localText")
-            appendLine("• ব্যান্ডউইথের চাপ: $bwText")
+            appendLine("• স্পিড$pkgTxt: ডাউনলোড $dlTxt | আপলোড $ulTxt [${levelTag(bwLevel)}]")
+            appendLine("• রাউটার পিং: $rPingTxt [${levelTag(routerLevel)}]")
+            appendLine("• ইন্টারনেট পিং: $pingTxt [${levelTag(inetLevel)}]")
+            appendLine("• DNS রেসপন্স: $dnsTxt [${levelTag(dnsRes.getString("level"))}]")
+            appendLine("• রাউটারের অবস্থা: [${levelTag(routerLevel)}] $routerText")
+            appendLine("• লোকাল লাইনের চাপ (ONU/কেবল): [${levelTag(localLevel)}] $localText")
+            appendLine("• ব্যান্ডউইথের চাপ: [${levelTag(bwLevel)}] $bwText")
             append("• মূল সমস্যা/পরামর্শ: $issueSummary")
         }
 
